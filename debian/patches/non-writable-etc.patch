@@ -1,0 +1,381 @@
+Index: systemd/src/basic/time-util.c
+===================================================================
+--- systemd.orig/src/basic/time-util.c
++++ systemd/src/basic/time-util.c
+@@ -1493,15 +1493,74 @@ bool clock_supported(clockid_t clock) {
+         }
+ }
+ 
++int find_localtime_last_symlink(char **ret) {
++        _cleanup_free_ char *path = NULL;
++        _cleanup_free_ char *last_symlink = NULL;
++        int r;
++        unsigned i;
++
++        path = strdup("/etc/localtime");
++        {
++                char *copy = strdup(path);
++                free_and_replace(last_symlink, copy);
++        }
++
++        for (i = 0; i < CHASE_SYMLINKS_MAX; ++i) {
++                _cleanup_free_ char *next = NULL;
++                struct stat st;
++
++                r = lstat(path, &st);
++                if ((r == 0) && S_ISLNK(st.st_mode)) {
++                        char *copy = strdup(path);
++                        free_and_replace(last_symlink, copy);
++                }
++
++                r = chase_symlinks(path, NULL, CHASE_STEP|CHASE_NONEXISTENT, &next, NULL);
++                if (r < 0)
++                        return r;
++
++                if (r == 0) {
++                        char *e = PATH_STARTSWITH_SET(next, "/usr/share/zoneinfo/");
++                        if (e) {
++                                break ;
++                        }
++                } else if (r > 0) {
++                        /* We cannot resolve further, it means the symlink is missing and t contains the path
++                           of the expected symlink */
++                        *ret = TAKE_PTR(last_symlink);
++                        return 0;
++                }
++
++                free_and_replace(path, next);
++        }
++
++        if (i >= CHASE_SYMLINKS_MAX) {
++                return -EINVAL;
++        }
++
++        *ret = TAKE_PTR(last_symlink);
++        return 0;
++}
++
+ int get_timezone(char **ret) {
+-        _cleanup_free_ char *t = NULL;
++        _cleanup_free_ char *symlink = NULL;
++        _cleanup_free_ char *path = NULL;
++        _cleanup_free_ char *rel_zoneinfo = NULL;
++        _cleanup_free_ char *link_dir = NULL;
+         const char *e;
+         char *z;
+         int r;
+         bool use_utc_fallback = false;
+ 
+-        r = readlink_malloc("/etc/localtime", &t);
++        r = find_localtime_last_symlink(&symlink);
+         if (r < 0) {
++                return r;
++        }
++
++        r = readlink_malloc(symlink, &path);
++        if (r < 0) {
++                _cleanup_free_ char *t = NULL;
++
+                 if (r == -ENOENT)
+                         use_utc_fallback = true;
+                 else if (r != -EINVAL)
+@@ -1536,7 +1595,15 @@ int get_timezone(char **ret) {
+                 return 0;
+         }
+ 
+-        e = PATH_STARTSWITH_SET(t, "/usr/share/zoneinfo/", "../usr/share/zoneinfo/");
++        link_dir = dirname_malloc(symlink);
++        if (!link_dir)
++                return -ENOMEM;
++
++        r = path_make_relative(link_dir, "/usr/share/zoneinfo/", &rel_zoneinfo);
++        if (r < 0)
++                return r;
++
++        e = PATH_STARTSWITH_SET(path, "/usr/share/zoneinfo/", rel_zoneinfo);
+         if (!e)
+                 return -EINVAL;
+ 
+Index: systemd/src/basic/time-util.h
+===================================================================
+--- systemd.orig/src/basic/time-util.h
++++ systemd/src/basic/time-util.h
+@@ -147,6 +147,7 @@ clockid_t clock_boottime_or_monotonic(vo
+ 
+ usec_t usec_shift_clock(usec_t, clockid_t from, clockid_t to);
+ 
++int find_localtime_last_symlink(char **symlink);
+ int get_timezone(char **timezone);
+ 
+ time_t mktime_or_timegm(struct tm *tm, bool utc);
+Index: systemd/src/core/manager.c
+===================================================================
+--- systemd.orig/src/core/manager.c
++++ systemd/src/core/manager.c
+@@ -401,14 +401,21 @@ static int manager_setup_time_change(Man
+ }
+ 
+ static int manager_read_timezone_stat(Manager *m) {
++        _cleanup_free_ char *link_path = NULL;
+         struct stat st;
+         bool changed;
++        int r;
+ 
+         assert(m);
+ 
++        r = find_localtime_last_symlink(&link_path);
++        if (r < 0) {
++                return r;
++        }
++
+         /* Read the current stat() data of /etc/localtime so that we detect changes */
+-        if (lstat("/etc/localtime", &st) < 0) {
+-                log_debug_errno(errno, "Failed to stat /etc/localtime, ignoring: %m");
++        if (lstat(link_path, &st) < 0) {
++                log_debug_errno(errno, "Failed to stat %s, ignoring: %m", link_path);
+                 changed = m->etc_localtime_accessible;
+                 m->etc_localtime_accessible = false;
+         } else {
+@@ -425,9 +432,15 @@ static int manager_read_timezone_stat(Ma
+ }
+ 
+ static int manager_setup_timezone_change(Manager *m) {
++        _cleanup_free_ char *link_path = NULL;
+         _cleanup_(sd_event_source_unrefp) sd_event_source *new_event = NULL;
+         int r;
+ 
++        r = find_localtime_last_symlink(&link_path);
++        if (r < 0) {
++                return r;
++        }
++
+         assert(m);
+ 
+         if (MANAGER_IS_TEST_RUN(m))
+@@ -444,14 +457,18 @@ static int manager_setup_timezone_change
+          * Note that we create the new event source first here, before releasing the old one. This should optimize
+          * behaviour as this way sd-event can reuse the old watch in case the inode didn't change. */
+ 
+-        r = sd_event_add_inotify(m->event, &new_event, "/etc/localtime",
++        r = sd_event_add_inotify(m->event, &new_event, link_path,
+                                  IN_ATTRIB|IN_MOVE_SELF|IN_CLOSE_WRITE|IN_DONT_FOLLOW, manager_dispatch_timezone_change, m);
+         if (r == -ENOENT) {
+                 /* If the file doesn't exist yet, subscribe to /etc instead, and wait until it is created either by
+                  * O_CREATE or by rename() */
++                _cleanup_free_ char *parent = NULL;
+ 
+-                log_debug_errno(r, "/etc/localtime doesn't exist yet, watching /etc instead.");
+-                r = sd_event_add_inotify(m->event, &new_event, "/etc",
++                parent = dirname_malloc(link_path);
++                if (!parent)
++                        return -ENOMEM;
++                log_debug_errno(r, "%s doesn't exist yet, watching %s instead.", link_path, parent);
++                r = sd_event_add_inotify(m->event, &new_event, parent,
+                                          IN_CREATE|IN_MOVED_TO|IN_ONLYDIR, manager_dispatch_timezone_change, m);
+         }
+         if (r < 0)
+Index: systemd/src/hostname/hostnamed.c
+===================================================================
+--- systemd.orig/src/hostname/hostnamed.c
++++ systemd/src/hostname/hostnamed.c
+@@ -17,6 +17,7 @@
+ #include "env-util.h"
+ #include "fileio-label.h"
+ #include "fileio.h"
++#include "fs-util.h"
+ #include "hostname-setup.h"
+ #include "hostname-util.h"
+ #include "id128-util.h"
+@@ -379,23 +380,29 @@ static void unset_statp(struct stat **p)
+ 
+ static int context_write_data_static_hostname(Context *c) {
+         _cleanup_(unset_statp) struct stat *s = NULL;
++        _cleanup_free_ char *resolved_path = NULL;
+         int r;
+ 
+         assert(c);
+ 
++        r = chase_symlinks("/etc/hostname", NULL, CHASE_NONEXISTENT, &resolved_path, NULL);
++        if (r < 0) {
++                return r;
++        }
++
+         /* Make sure that if we fail here, we invalidate the cached information, since it was updated
+          * already, even if we can't make it hit the disk. */
+         s = &c->etc_hostname_stat;
+ 
+         if (isempty(c->data[PROP_STATIC_HOSTNAME])) {
+-                if (unlink("/etc/hostname") < 0 && errno != ENOENT)
++                if (unlink(resolved_path) < 0 && errno != ENOENT)
+                         return -errno;
+ 
+                 TAKE_PTR(s);
+                 return 0;
+         }
+ 
+-        r = write_string_file_atomic_label("/etc/hostname", c->data[PROP_STATIC_HOSTNAME]);
++        r = write_string_file_atomic_label(resolved_path, c->data[PROP_STATIC_HOSTNAME]);
+         if (r < 0)
+                 return r;
+ 
+@@ -404,6 +411,7 @@ static int context_write_data_static_hos
+ }
+ 
+ static int context_write_data_machine_info(Context *c) {
++        _cleanup_free_ char *resolved_path = NULL;
+         _cleanup_(unset_statp) struct stat *s = NULL;
+         static const char * const name[_PROP_MAX] = {
+                 [PROP_PRETTY_HOSTNAME] = "PRETTY_HOSTNAME",
+@@ -417,11 +425,17 @@ static int context_write_data_machine_in
+ 
+         assert(c);
+ 
++        r = chase_symlinks("/etc/machine-info", NULL, CHASE_NONEXISTENT, &resolved_path, NULL);
++        if (r < 0) {
++                return r;
++        }
++
+         /* Make sure that if we fail here, we invalidate the cached information, since it was updated
+          * already, even if we can't make it hit the disk. */
+         s = &c->etc_machine_info_stat;
+ 
+-        r = load_env_file(NULL, "/etc/machine-info", &l);
++        r = load_env_file(NULL, resolved_path, &l);
++
+         if (r < 0 && r != -ENOENT)
+                 return r;
+ 
+@@ -434,14 +448,14 @@ static int context_write_data_machine_in
+         }
+ 
+         if (strv_isempty(l)) {
+-                if (unlink("/etc/machine-info") < 0 && errno != ENOENT)
++                if (unlink(resolved_path) < 0 && errno != ENOENT)
+                         return -errno;
+ 
+                 TAKE_PTR(s);
+                 return 0;
+         }
+ 
+-        r = write_env_file_label("/etc/machine-info", l);
++        r = write_env_file_label(resolved_path, l);
+         if (r < 0)
+                 return r;
+ 
+Index: systemd/src/timedate/timedated.c
+===================================================================
+--- systemd.orig/src/timedate/timedated.c
++++ systemd/src/timedate/timedated.c
+@@ -292,12 +292,26 @@ static int context_read_data(Context *c)
+ 
+ static int context_write_data_timezone(Context *c) {
+         _cleanup_free_ char *p = NULL;
++        _cleanup_free_ char *link_path = NULL;
++        _cleanup_free_ char *link_dir = NULL;
++        _cleanup_free_ char *relpath = NULL;
++        _cleanup_free_ char *timezone_resolved = NULL;
+         const char *source;
+         int r = 0;
+         struct stat st;
+ 
+         assert(c);
+ 
++        r = find_localtime_last_symlink(&link_path);
++        if (r < 0) {
++                return r;
++        }
++
++        r = chase_symlinks("/etc/timezone", NULL, CHASE_NONEXISTENT, &timezone_resolved, NULL);
++        if (r < 0) {
++                return r;
++        }
++
+         /* No timezone is very similar to UTC. Hence in either of these cases link the UTC file in. Except if
+          * it isn't installed, in which case we remove the symlink altogether. Since glibc defaults to an
+          * internal version of UTC in that case behaviour is mostly equivalent. We still prefer creating the
+@@ -306,31 +320,40 @@ static int context_write_data_timezone(C
+         if (isempty(c->zone) || streq(c->zone, "UTC")) {
+ 
+                 if (access("/usr/share/zoneinfo/UTC", F_OK) < 0) {
++                        r = 0;
+ 
+-                        if (unlink("/etc/localtime") < 0 && errno != ENOENT)
++                        if (unlink(link_path) < 0 && errno != ENOENT)
+                                 r = -errno;
+ 
+-                        if (unlink("/etc/timezone") < 0 && errno != ENOENT)
++                        if (unlink(timezone_resolved) < 0 && errno != ENOENT)
+                                 r = -errno;
+ 
+                         return r;
+                 }
+ 
+-                source = "../usr/share/zoneinfo/UTC";
++                source = "/usr/share/zoneinfo/UTC";
+         } else {
+-                p = path_join("../usr/share/zoneinfo", c->zone);
++                p = path_join("/usr/share/zoneinfo", c->zone);
+                 if (!p)
+                         return -ENOMEM;
+ 
+                 source = p;
+         }
+ 
+-        r = symlink_atomic(source, "/etc/localtime");
++        link_dir = dirname_malloc(link_path);
++        if (!link_dir)
++                return -ENOMEM;
++
++        r = path_make_relative(link_dir, source, &relpath);
++        if (r < 0)
++                return r;
++
++        r = symlink_atomic(relpath, link_path);
+         if (r < 0)
+                 return r;
+ 
+-        if (stat("/etc/timezone", &st) == 0 && S_ISREG(st.st_mode)) {
+-                r = write_string_file("/etc/timezone", c->zone, WRITE_STRING_FILE_CREATE|WRITE_STRING_FILE_ATOMIC);
++        if (stat(timezone_resolved, &st) == 0 && S_ISREG(st.st_mode)) {
++                r = write_string_file(timezone_resolved, c->zone, WRITE_STRING_FILE_CREATE|WRITE_STRING_FILE_ATOMIC);
+                 if (r < 0)
+                         return r;
+         }
+@@ -339,12 +362,18 @@ static int context_write_data_timezone(C
+ }
+ 
+ static int context_write_data_local_rtc(Context *c) {
++        _cleanup_free_ char *resolved_path = NULL;
+         _cleanup_free_ char *s = NULL, *w = NULL;
+         int r;
+ 
+         assert(c);
+ 
+-        r = read_full_file("/etc/adjtime", &s, NULL);
++        r = chase_symlinks("/etc/adjtime", NULL, CHASE_NONEXISTENT, &resolved_path, NULL);
++        if (r < 0) {
++                return r;
++        }
++
++        r = read_full_file(resolved_path, &s, NULL);
+         if (r < 0) {
+                 if (r != -ENOENT)
+                         return r;
+@@ -396,7 +425,7 @@ static int context_write_data_local_rtc(
+                 *(char*) mempcpy(stpcpy(stpcpy(mempcpy(w, s, a), prepend), c->local_rtc ? "LOCAL" : "UTC"), e, b) = 0;
+ 
+                 if (streq(w, NULL_ADJTIME_UTC)) {
+-                        if (unlink("/etc/adjtime") < 0)
++                        if (unlink(resolved_path) < 0)
+                                 if (errno != ENOENT)
+                                         return -errno;
+ 
+@@ -408,7 +437,7 @@ static int context_write_data_local_rtc(
+         if (r < 0)
+                 return r;
+ 
+-        return write_string_file_atomic_label("/etc/adjtime", w);
++        return write_string_file_atomic_label(resolved_path, w);
+ }
+ 
+ static int context_update_ntp_status(Context *c, sd_bus *bus, sd_bus_message *m) {

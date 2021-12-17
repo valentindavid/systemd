@@ -40,9 +40,6 @@ debian/UBUNTU-wait-online-exit-if-no-links-are-managed.patch
 debian/UBUNTU-journald.service-set-Nice-1-to-dodge-watchdog-on-soft-loc.patch
 debian/UBUNTU-units-block-CAP_SYS_MODULE-units-in-containers-too.patch
 debian/UBUNTU-test-sleep-skip-test_fiemap-upon-inapproriate-ioctl-.patch
-debian/UBUNTU-Support-system-image-read-only-etc.patch
-debian/timedatectl-lp1650688.patch
-debian/UBUNTU-Fix-timezone-setting-on-read-only-etc.patch
 debian/UBUNTU-Revert-namespace-be-more-careful-when-handling-namespacin.patch
 debian/UBUNTU-Revert-cgroup-Continue-unit-reset-if-cgroup-is-busy.patch
 debian/UBUNTU-resolved-default-no-negative-caching.patch
@@ -61,3 +58,4 @@ lp1943561/Use-SKU-to-identify-Dell-clamshell-models-for-acceleromet.patch
 lp1943561/Add-additional-Dell-models-that-require-ACCEL_LOCATION-ba.patch
 lp1952733-hwdb-60-keyboard-Update-Dell-Privacy-Micmute-Hotkey-Map.patch
 lp1952735-keymap-Add-microphone-mute-keymap-for-Dell-Machine.patch
+non-writable-etc.patch
