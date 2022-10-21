@@ -45,6 +45,8 @@
 #include "umount.h"
 #include "util.h"
 #include "virt.h"
+#include "unit-name.h"
+#include "mkdir.h"
 
 static void mount_point_free(MountPoint **head, MountPoint *m) {
         assert(head);
@@ -852,11 +854,61 @@ static int umount_all_once(bool *changed, bool last_try) {
         return mount_points_list_umount(&mp_list_head, changed, last_try);
 }
 
+static void try_move_mounts(void) {
+        int r;
+        bool continue_moves = true;
+
+        while (continue_moves) {
+                _cleanup_(mount_points_list_free) LIST_HEAD(MountPoint, mp_list_head);
+
+                LIST_HEAD_INIT(mp_list_head);
+                r = mount_points_list_get(NULL, &mp_list_head);
+                if (r < 0)
+                        return ;
+
+                continue_moves = false;
+
+                LIST_FOREACH(mount_point, m, mp_list_head) {
+                        bool already_moved = false;
+
+                        if (nonunmountable_path(m->path))
+                                continue;
+
+                        if (path_startswith(m->path, "/run/shutdown/mounts/")) {
+                                _cleanup_free_ char *dirname = NULL;
+                                r = path_extract_directory(m->path, &dirname);
+                                if (r != 0)
+                                        continue ;
+                                if (path_equal(dirname, "/run/shutdown/mounts")) {
+                                        already_moved = true;
+                                }
+                        }
+
+                        if (!already_moved) {
+                                _cleanup_free_ char *newpath = NULL;
+                                _cleanup_free_ char *escaped = NULL;
+                                r = unit_name_path_escape(m->path, &escaped);
+                                if (r != 0)
+                                        continue ;
+                                asprintf(&newpath, "/run/shutdown/mounts/%s", escaped);
+                                (void) mkdir_p(newpath, 0700);
+                                r = mount(m->path, newpath, NULL, MS_MOVE, NULL);
+                                if (r != 0)
+                                        continue ;
+                                continue_moves = true;
+                                break ;
+                        }
+                }
+        }
+}
+
 int umount_all(bool *changed, bool last_try) {
         bool umount_changed;
         int r;
 
         assert(changed);
+
+        try_move_mounts();
 
         /* Retry umount, until nothing can be umounted anymore. Mounts are processed in order, newest
          * first. The retries are needed when an old mount has been moved, to a path inside a newer mount. */
