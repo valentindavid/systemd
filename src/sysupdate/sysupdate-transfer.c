@@ -714,6 +714,8 @@ int transfer_vacuum(
                         if (r < 0 && r != -ENOENT)
                                 return log_error_errno(r, "Failed to make room, deleting '%s' failed: %m", oldest->path);
 
+                        (void) rmdir_parents(oldest->path, t->target.path);
+
                         break;
 
                 case RESOURCE_PARTITION: {
