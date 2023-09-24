@@ -204,6 +204,7 @@ Path=/EFI/Linux
 PathRelativeTo=boot
 MatchPattern=uki_@v.efi.extra.d/extra.addon.efi
 Mode=0444
+InstancesMax=2
 EOF
 
     rm -rf /var/tmp/72-esp /var/tmp/72-xbootldr
