@@ -74,6 +74,35 @@ testcase_timezone() {
     fi
 }
 
+teardown_timezone_alternate_path() {
+    set +eu
+
+    rm -rf /run/systemd/system/systemd-timedated.service.d
+    systemctl daemon-reload
+    systemctl restart systemd-timedated
+}
+
+testcase_timezone_alternate_path() {
+    trap teardown_timedated_alternate_path RETURN
+
+    mkdir -p /run/alternate-path
+    mkdir -p /run/systemd/system/systemd-timedated.service.d
+    cat >/run/systemd/system/systemd-timedated.service.d/override.conf <<EOF
+[Service]
+Environment=SYSTEMD_ETC_LOCALTIME=/run/alternate-path/localtime
+EOF
+    systemctl daemon-reload
+    systemctl restart systemd-timedated
+
+    echo 'timedatectl works'
+    assert_in "Local time:" "$(timedatectl --no-pager)"
+
+    echo 'change timezone'
+    assert_eq "$(timedatectl --no-pager set-timezone Europe/Kyiv 2>&1)" ""
+    assert_eq "$(readlink /run/alternate-path/localtime | sed 's#^.*zoneinfo/##')" "Europe/Kyiv"
+    assert_in "Time zone: Europe/Kyiv \(EES*T, \+0[0-9]00\)" "$(timedatectl)"
+}
+
 restore_adjtime() {
     if [[ -e /etc/adjtime.bak ]]; then
         mv /etc/adjtime.bak /etc/adjtime

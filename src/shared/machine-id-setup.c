@@ -130,13 +130,17 @@ static int acquire_machine_id(const char *root, bool machine_id_from_firmware, s
         return 0;
 }
 
+static const char *etc_machine_id(void) {
+        return secure_getenv("SYSTEMD_ETC_MACHINE_ID") ?: "/etc/machine-id";
+}
+
 int machine_id_setup(const char *root, sd_id128_t machine_id, MachineIdSetupFlags flags, sd_id128_t *ret) {
-        const char *etc_machine_id, *run_machine_id;
+        const char *etc_machine_id_path, *run_machine_id;
         _cleanup_close_ int fd = -EBADF;
         bool writable, write_run_machine_id = true;
         int r;
 
-        etc_machine_id = prefix_roota(root, "/etc/machine-id");
+        etc_machine_id_path = prefix_roota(root, etc_machine_id());
 
         WITH_UMASK(0000) {
                 /* We create this 0444, to indicate that this isn't really
@@ -144,12 +148,12 @@ int machine_id_setup(const char *root, sd_id128_t machine_id, MachineIdSetupFlag
                  * will be owned by root it doesn't matter much, but maybe
                  * people look. */
 
-                (void) mkdir_parents(etc_machine_id, 0755);
-                fd = open(etc_machine_id, O_RDWR|O_CREAT|O_CLOEXEC|O_NOCTTY, 0444);
+                (void) mkdir_parents(etc_machine_id_path, 0755);
+                fd = open(etc_machine_id_path, O_RDWR|O_CREAT|O_CLOEXEC|O_NOCTTY, 0444);
                 if (fd < 0) {
                         int old_errno = errno;
 
-                        fd = open(etc_machine_id, O_RDONLY|O_CLOEXEC|O_NOCTTY);
+                        fd = open(etc_machine_id_path, O_RDONLY|O_CLOEXEC|O_NOCTTY);
                         if (fd < 0) {
                                 if (old_errno == EROFS && errno == ENOENT)
                                         return log_error_errno(errno,
@@ -159,7 +163,7 @@ int machine_id_setup(const char *root, sd_id128_t machine_id, MachineIdSetupFlag
                                                   "2) /etc/machine-id exists and is empty.\n"
                                                   "3) /etc/machine-id is missing and /etc is writable.\n");
                                 else
-                                        return log_error_errno(errno, "Cannot open %s: %m", etc_machine_id);
+                                        return log_error_errno(errno, "Cannot open %s: %m", etc_machine_id_path);
                         }
 
                         writable = false;
@@ -183,10 +187,10 @@ int machine_id_setup(const char *root, sd_id128_t machine_id, MachineIdSetupFlag
 
         if (writable) {
                 if (lseek(fd, 0, SEEK_SET) < 0)
-                        return log_error_errno(errno, "Failed to seek %s: %m", etc_machine_id);
+                        return log_error_errno(errno, "Failed to seek %s: %m", etc_machine_id_path);
 
                 if (ftruncate(fd, 0) < 0)
-                        return log_error_errno(errno, "Failed to truncate %s: %m", etc_machine_id);
+                        return log_error_errno(errno, "Failed to truncate %s: %m", etc_machine_id_path);
 
                 /* If the caller requested a transient machine-id, write the string "uninitialized\n" to
                  * disk and overmount it with a transient file.
@@ -195,15 +199,15 @@ int machine_id_setup(const char *root, sd_id128_t machine_id, MachineIdSetupFlag
                 if (FLAGS_SET(flags, MACHINE_ID_SETUP_FORCE_TRANSIENT)) {
                         r = loop_write(fd, "uninitialized\n", SIZE_MAX);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to write uninitialized %s: %m", etc_machine_id);
+                                return log_error_errno(r, "Failed to write uninitialized %s: %m", etc_machine_id_path);
 
                         r = fsync_full(fd);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to sync %s: %m", etc_machine_id);
+                                return log_error_errno(r, "Failed to sync %s: %m", etc_machine_id_path);
                 } else {
                         r = id128_write_fd(fd, ID128_FORMAT_PLAIN | ID128_SYNC_ON_WRITE, machine_id);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to write %s: %m", etc_machine_id);
+                                return log_error_errno(r, "Failed to write %s: %m", etc_machine_id_path);
                         else
                                 goto finish;
                 }
@@ -226,16 +230,16 @@ int machine_id_setup(const char *root, sd_id128_t machine_id, MachineIdSetupFlag
         }
 
         /* And now, let's mount it over */
-        r = mount_follow_verbose(LOG_ERR, run_machine_id, etc_machine_id, NULL, MS_BIND, NULL);
+        r = mount_follow_verbose(LOG_ERR, run_machine_id, etc_machine_id_path, NULL, MS_BIND, NULL);
         if (r < 0) {
                 (void) unlink(run_machine_id);
                 return r;
         }
 
-        log_full(FLAGS_SET(flags, MACHINE_ID_SETUP_FORCE_TRANSIENT) ? LOG_DEBUG : LOG_INFO, "Installed transient %s file.", etc_machine_id);
+        log_full(FLAGS_SET(flags, MACHINE_ID_SETUP_FORCE_TRANSIENT) ? LOG_DEBUG : LOG_INFO, "Installed transient %s file.", etc_machine_id_path);
 
         /* Mark the mount read-only */
-        r = mount_follow_verbose(LOG_WARNING, NULL, etc_machine_id, NULL, MS_BIND|MS_RDONLY|MS_REMOUNT, NULL);
+        r = mount_follow_verbose(LOG_WARNING, NULL, etc_machine_id_path, NULL, MS_BIND|MS_RDONLY|MS_REMOUNT, NULL);
         if (r < 0)
                 return r;
 

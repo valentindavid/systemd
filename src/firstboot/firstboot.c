@@ -350,6 +350,10 @@ static int prompt_locale(int rfd) {
         return 0;
 }
 
+static const char *etc_locale_conf(void) {
+        return secure_getenv("SYSTEMD_ETC_LOCALE_CONF") ?: "/etc/locale.conf";
+}
+
 static int process_locale(int rfd) {
         _cleanup_close_ int pfd = -EBADF;
         _cleanup_free_ char *f = NULL;
@@ -359,7 +363,8 @@ static int process_locale(int rfd) {
 
         assert(rfd >= 0);
 
-        pfd = chase_and_open_parent_at(rfd, "/etc/locale.conf",
+        const char *locale_conf_path = etc_locale_conf();
+        pfd = chase_and_open_parent_at(rfd, locale_conf_path,
                                        CHASE_AT_RESOLVE_IN_ROOT|CHASE_MKDIR_0755|CHASE_WARN|CHASE_NOFOLLOW,
                                        &f);
         if (pfd < 0)
@@ -376,7 +381,7 @@ static int process_locale(int rfd) {
                 return log_error_errno(r, "Failed to check if directory file descriptor is root: %m");
 
         if (arg_copy_locale && r == 0) {
-                r = copy_file_atomic_at(AT_FDCWD, "/etc/locale.conf", pfd, f, 0644, COPY_REFLINK);
+                r = copy_file_atomic_at(AT_FDCWD, locale_conf_path, pfd, f, 0644, COPY_REFLINK);
                 if (r != -ENOENT) {
                         if (r < 0)
                                 return log_error_errno(r, "Failed to copy host's /etc/locale.conf: %m");
@@ -458,6 +463,10 @@ static int prompt_keymap(int rfd) {
                            kmaps, 60, keymap_is_ok, &arg_keymap);
 }
 
+static const char *etc_vconsole_conf(void) {
+        return secure_getenv("SYSTEMD_ETC_VCONSOLE_CONF") ?: "/etc/vconsole.conf";
+}
+
 static int process_keymap(int rfd) {
         _cleanup_close_ int pfd = -EBADF;
         _cleanup_free_ char *f = NULL;
@@ -466,7 +475,8 @@ static int process_keymap(int rfd) {
 
         assert(rfd >= 0);
 
-        pfd = chase_and_open_parent_at(rfd, "/etc/vconsole.conf",
+        const char *vconsole_conf_path = etc_vconsole_conf();
+        pfd = chase_and_open_parent_at(rfd, vconsole_conf_path,
                                        CHASE_AT_RESOLVE_IN_ROOT|CHASE_MKDIR_0755|CHASE_WARN|CHASE_NOFOLLOW,
                                        &f);
         if (pfd < 0)
@@ -483,7 +493,7 @@ static int process_keymap(int rfd) {
                 return log_error_errno(r, "Failed to check if directory file descriptor is root: %m");
 
         if (arg_copy_keymap && r == 0) {
-                r = copy_file_atomic_at(AT_FDCWD, "/etc/vconsole.conf", pfd, f, 0644, COPY_REFLINK);
+                r = copy_file_atomic_at(AT_FDCWD, vconsole_conf_path, pfd, f, 0644, COPY_REFLINK);
                 if (r != -ENOENT) {
                         if (r < 0)
                                 return log_error_errno(r, "Failed to copy host's /etc/vconsole.conf: %m");
@@ -558,7 +568,8 @@ static int process_timezone(int rfd) {
 
         assert(rfd >= 0);
 
-        pfd = chase_and_open_parent_at(rfd, "/etc/localtime",
+        const char *localtime_path = etc_localtime();
+        pfd = chase_and_open_parent_at(rfd, localtime_path,
                                        CHASE_AT_RESOLVE_IN_ROOT|CHASE_MKDIR_0755|CHASE_WARN|CHASE_NOFOLLOW,
                                        &f);
         if (pfd < 0)
@@ -577,7 +588,7 @@ static int process_timezone(int rfd) {
         if (arg_copy_timezone && r == 0) {
                 _cleanup_free_ char *s = NULL;
 
-                r = readlink_malloc("/etc/localtime", &s);
+                r = readlink_malloc(localtime_path, &s);
                 if (r != -ENOENT) {
                         if (r < 0)
                                 return log_error_errno(r, "Failed to read host's /etc/localtime: %m");
@@ -598,7 +609,7 @@ static int process_timezone(int rfd) {
         if (isempty(arg_timezone))
                 return 0;
 
-        e = strjoina("../usr/share/zoneinfo/", arg_timezone);
+        e = strjoina("/usr/share/zoneinfo/", arg_timezone);
 
         r = symlinkat_atomic_full(e, pfd, f, /* make_relative= */ false);
         if (r < 0)

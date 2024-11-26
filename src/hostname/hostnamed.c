@@ -600,30 +600,39 @@ static void unset_statp(struct stat **p) {
         **p = (struct stat) {};
 }
 
+static const char *etc_hostname(void) {
+        return secure_getenv("SYSTEMD_ETC_HOSTNAME") ?: "/etc/hostname";
+}
+
 static int context_write_data_static_hostname(Context *c) {
         _cleanup_(unset_statp) struct stat *s = NULL;
         int r;
 
         assert(c);
 
+        const char *hostname_path = etc_hostname();
         /* Make sure that if we fail here, we invalidate the cached information, since it was updated
          * already, even if we can't make it hit the disk. */
         s = &c->etc_hostname_stat;
 
         if (isempty(c->data[PROP_STATIC_HOSTNAME])) {
-                if (unlink("/etc/hostname") < 0 && errno != ENOENT)
+                if (unlink(hostname_path) < 0 && errno != ENOENT)
                         return -errno;
 
                 TAKE_PTR(s);
                 return 0;
         }
 
-        r = write_string_file("/etc/hostname", c->data[PROP_STATIC_HOSTNAME], WRITE_STRING_FILE_CREATE|WRITE_STRING_FILE_ATOMIC|WRITE_STRING_FILE_LABEL);
+        r = write_string_file(hostname_path, c->data[PROP_STATIC_HOSTNAME], WRITE_STRING_FILE_CREATE|WRITE_STRING_FILE_ATOMIC|WRITE_STRING_FILE_LABEL);
         if (r < 0)
                 return r;
 
         TAKE_PTR(s);
         return 0;
+}
+
+static const char *etc_machine_info(void) {
+        return secure_getenv("SYSTEMD_ETC_MACHINE_INFO") ?: "/etc/machine-info";
 }
 
 static int context_write_data_machine_info(Context *c) {
@@ -640,11 +649,12 @@ static int context_write_data_machine_info(Context *c) {
 
         assert(c);
 
+        const char* machine_info_path = etc_machine_info();
         /* Make sure that if we fail here, we invalidate the cached information, since it was updated
          * already, even if we can't make it hit the disk. */
         s = &c->etc_machine_info_stat;
 
-        r = load_env_file(NULL, "/etc/machine-info", &l);
+        r = load_env_file(NULL, machine_info_path, &l);
         if (r < 0 && r != -ENOENT)
                 return r;
 
@@ -657,14 +667,14 @@ static int context_write_data_machine_info(Context *c) {
         }
 
         if (strv_isempty(l)) {
-                if (unlink("/etc/machine-info") < 0 && errno != ENOENT)
+                if (unlink(machine_info_path) < 0 && errno != ENOENT)
                         return -errno;
 
                 TAKE_PTR(s);
                 return 0;
         }
 
-        r = write_env_file_label(AT_FDCWD, "/etc/machine-info", NULL, l);
+        r = write_env_file_label(AT_FDCWD, machine_info_path, NULL, l);
         if (r < 0)
                 return r;
 
