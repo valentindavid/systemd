@@ -130,7 +130,12 @@ static int acquire_machine_id(const char *root, bool machine_id_from_firmware, s
         return 0;
 }
 
+static const char *etc_machine_id_from_env(void) {
+        return secure_getenv("SYSTEMD_ETC_MACHINE_ID") ?: "/etc/machine-id";
+}
+
 int machine_id_setup(const char *root, sd_id128_t machine_id, MachineIdSetupFlags flags, sd_id128_t *ret) {
+        const char *etc_machine_id_path;
         _cleanup_free_ char *etc_machine_id = NULL, *run_machine_id = NULL;
         bool writable, write_run_machine_id = true;
         _cleanup_close_ int fd = -EBADF, run_fd = -EBADF;
@@ -140,16 +145,31 @@ int machine_id_setup(const char *root, sd_id128_t machine_id, MachineIdSetupFlag
         WITH_UMASK(0000) {
                 _cleanup_close_ int inode_fd = -EBADF;
 
-                r = chase("/etc/machine-id", root, CHASE_PREFIX_ROOT|CHASE_MUST_BE_REGULAR, &etc_machine_id, &inode_fd);
+                etc_machine_id_path = etc_machine_id_from_env();
+
+                r = chase(etc_machine_id_path, root, CHASE_PREFIX_ROOT|CHASE_MUST_BE_REGULAR, &etc_machine_id, &inode_fd);
                 if (r == -ENOENT) {
+                        _cleanup_free_ char *machine_id_filename = NULL, *machine_id_dir = NULL, *machine_id_dir_slash = NULL;
                         _cleanup_close_ int etc_fd = -EBADF;
                         _cleanup_free_ char *etc = NULL;
 
-                        r = chase("/etc/", root, CHASE_PREFIX_ROOT|CHASE_MKDIR_0755|CHASE_MUST_BE_DIRECTORY, &etc, &etc_fd);
+                        r = path_extract_directory(etc_machine_id, &machine_id_dir);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to open '/etc/': %m");
+                                return log_error_errno(r, "Cannot extract directory of %s: %m", etc_machine_id);
+                        /* let's add a slash, so it should like /etc/ */
+                        machine_id_dir_slash = path_join(machine_id_dir, "");
+                        if (!machine_id_dir)
+                                return log_oom();
+                        r = path_extract_filename(etc_machine_id, &machine_id_filename);
+                        if (r < 0)
+                                return log_error_errno(r, "Cannot extract filename of %s: %m", etc_machine_id);
 
-                        etc_machine_id = path_join(etc, "machine-id");
+                        r = chase(machine_id_dir_slash, root, CHASE_PREFIX_ROOT|CHASE_MKDIR_0755|CHASE_MUST_BE_DIRECTORY, &etc, &etc_fd);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to open '%s': %m", machine_id_dir_slash);
+
+                        free(etc_machine_id);
+                        etc_machine_id = path_join(etc, machine_id_filename);
                         if (!etc_machine_id)
                                 return log_oom();
 
@@ -157,7 +177,7 @@ int machine_id_setup(const char *root, sd_id128_t machine_id, MachineIdSetupFlag
                          * modify. Of course, since the file will be owned by root it doesn't matter much, but maybe
                          * people look. */
 
-                        fd = openat(etc_fd, "machine-id", O_CREAT|O_EXCL|O_RDWR|O_NOFOLLOW|O_CLOEXEC, 0444);
+                        fd = openat(etc_fd, machine_id_filename, O_CREAT|O_EXCL|O_RDWR|O_NOFOLLOW|O_CLOEXEC, 0444);
                         if (fd < 0) {
                                 if (errno == EROFS)
                                         return log_error_errno(errno,
@@ -175,7 +195,7 @@ int machine_id_setup(const char *root, sd_id128_t machine_id, MachineIdSetupFlag
                         log_debug("Successfully opened new '%s' file.", etc_machine_id);
                         writable = true;
                 } else if (r < 0)
-                        return log_error_errno(r, "Cannot open '/etc/machine-id': %m");
+                        return log_error_errno(r, "Cannot open '%s': %m", etc_machine_id_path);
                 else {
                         /* We pinned the inode, now try to convert it into a writable file */
 
@@ -218,10 +238,10 @@ int machine_id_setup(const char *root, sd_id128_t machine_id, MachineIdSetupFlag
 
         if (writable) {
                 if (lseek(fd, 0, SEEK_SET) < 0)
-                        return log_error_errno(errno, "Failed to seek %s: %m", etc_machine_id);
+                        return log_error_errno(errno, "Failed to seek %s: %m", etc_machine_id_path);
 
                 if (ftruncate(fd, 0) < 0)
-                        return log_error_errno(errno, "Failed to truncate %s: %m", etc_machine_id);
+                        return log_error_errno(errno, "Failed to truncate %s: %m", etc_machine_id_path);
 
                 /* If the caller requested a transient machine-id, write the string "uninitialized\n" to
                  * disk and overmount it with a transient file.
