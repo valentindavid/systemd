@@ -1170,6 +1170,10 @@ conf.set10('HAVE_LIBCRYPTSETUP', have)
 conf.set10('HAVE_LIBCRYPTSETUP_PLUGINS',
            libcryptsetup_plugins.allowed() and have)
 
+libdevmapper = dependency('devmapper', required : get_option('libdevmapper'))
+libdevmapper_cflags = libdevmapper.partial_dependency(includes: true, compile_args: true)
+conf.set10('HAVE_LIBDEVMAPPER', libdevmapper.found())
+
 libcurl = dependency('libcurl',
                      version : '>= 7.32.0',
                      required : get_option('libcurl'))

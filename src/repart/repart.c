@@ -29,6 +29,7 @@
 #include "crypto-util.h"
 #include "cryptsetup-util.h"
 #include "device-util.h"
+#include "devmapper-util.h"
 #include "devnum-util.h"
 #include "dirent-util.h"
 #include "dissect-image.h"
@@ -496,6 +497,8 @@ typedef struct Partition {
         char *block_device_replace;
         BtrfsReplacement *btrfs_replaced;
         char *volume_name;
+        char *verity_hash_replace;
+        char *verity_data_replace;
         char **exclude_files_source;
         char **exclude_files_target;
         char **make_directories;
@@ -840,6 +843,8 @@ static Partition* partition_free(Partition *p) {
         free(p->block_device_replace);
         btrfs_replacement_free(p->btrfs_replaced);
         free(p->volume_name);
+        free(p->verity_data_replace);
+        free(p->verity_hash_replace);
         strv_free(p->exclude_files_source);
         strv_free(p->exclude_files_target);
         strv_free(p->make_directories);
@@ -887,6 +892,8 @@ static void partition_foreignize(Partition *p) {
         p->block_device_replace = mfree(p->block_device_replace);
         p->btrfs_replaced = btrfs_replacement_free(p->btrfs_replaced);
         p->volume_name = mfree(p->volume_name);
+        p->verity_data_replace = mfree(p->verity_data_replace);
+        p->verity_hash_replace = mfree(p->verity_hash_replace);
         p->exclude_files_source = strv_free(p->exclude_files_source);
         p->exclude_files_target = strv_free(p->exclude_files_target);
         p->make_directories = strv_free(p->make_directories);
@@ -2968,6 +2975,8 @@ static int partition_read_definition(
                 { "Partition", "Discard",                  config_parse_tristate,          0,                                  &p->discard                 },
                 { "Partition", "BlockDeviceReplace",       config_parse_path,              0,                                  &p->block_device_replace    },
                 { "Partition", "VolumeName",               config_parse_string,            CONFIG_PARSE_STRING_SAFE,           &p->volume_name             },
+                { "Partition", "VerityHashReplace",        config_parse_string,            0,                                  &p->verity_hash_replace           },
+                { "Partition", "VerityDataReplace",        config_parse_string,            0,                                  &p->verity_data_replace           },
                 {}
         };
         _cleanup_free_ char *filename = NULL;
@@ -6304,7 +6313,7 @@ static int context_copy_blocks(Context *context) {
                 usec_t start_timestamp = now(CLOCK_MONOTONIC);
 
                 r = partition_target_prepare(context, p, p->new_size,
-                                             /* need_path= */ p->encrypt != ENCRYPT_OFF || p->siblings[VERITY_HASH],
+                                             /* need_path= */ p->encrypt != ENCRYPT_OFF || p->siblings[VERITY_HASH] || p->verity_hash_replace || p->verity_data_replace,
                                              &t);
                 if (r < 0)
                         return r;
@@ -6362,6 +6371,37 @@ static int context_copy_blocks(Context *context) {
                         r = partition_format_verity_sig(context, p->siblings[VERITY_SIG]);
                         if (r < 0)
                                 return r;
+                }
+
+                if (p->verity_hash_replace) {
+#if HAVE_LIBDEVMAPPER
+                        if (t->block_partition)
+                                r = swap_verity_devices(p->verity_hash_replace, NULL, t->block_partition->node);
+                        else
+                                return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
+                                                       "VerityHashReplace= expects a paritionable device.");
+                        if (r < 0)
+                                return r;
+#else
+                        return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
+                                               "VerityHashReplace= cannot be used without libdevmapper.");
+#endif
+                }
+
+                if (p->verity_data_replace) {
+#if HAVE_LIBDEVMAPPER
+                        if (t->block_partition)
+                                r = swap_verity_devices(p->verity_data_replace, t->block_partition->node, NULL);
+                        else
+                                return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
+                                                       "VerityDataReplace= expects a paritionable device.");
+                        if (r < 0)
+                                return r;
+#else
+                        return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
+                                               "VerityDataReplace= cannot be used without libdevmapper.");
+#endif
+
                 }
         }
 
